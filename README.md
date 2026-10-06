@@ -45,6 +45,15 @@ Consequences that the whole design rests on:
 * **Semantically wrong lines stay possible and count as failure.** Wrong operands, a
   non-divisible division, and a correct operation with a wrongly written result are all
   `semantic_fail`.
+* **Every intermediate must be an integer from 0 to 99, which excludes some standard Countdown
+  solutions.** Two digits and no sign means a negative, a fraction or a value above 99 cannot be
+  written at all, so a route through one is not a solution here. Of the 495 four-multisets of
+  1..9, 7 reach 24 in ordinary Countdown but have no solution under this grammar — `(1,5,5,5)`
+  needs `5*(5-1/5)`, `(3,3,8,8)` needs `8/(3-8/3)`. Consequently **"all correct suffixes" always
+  means all correct suffixes under this grammar**, and the instance set is built with the same
+  rule: `make_instances.py` requires two distinct solvable first-step events *under this grammar*,
+  and the `success_strings` and `solvable_entries` in `instances.json` are the same restricted
+  sets. Every number reported is about this action space, never about the ordinary game.
 * **Overlength has probability zero**, because a line is at most 9 symbols and the cap is
   3 × 9 = 27. The class still exists and is still accounted for; unfinished generations are
   never dropped or renormalised away.
@@ -74,7 +83,8 @@ Plus `p_first_line_semantically_wrong`: the mass on a grammatical but semantical
 opening line, which separates "did not choose the route" from "cannot write a legal line at all".
 
 All four are computed **exactly**, by teacher-forced scoring of every successful string, never by
-sampling. `measure.py` additionally samples, only to confirm the exact numbers.
+sampling. `measure.py` additionally samples, only to confirm the exact numbers. `e` sums over
+every correct suffix *in this action space* — see the integer 0..99 restriction above.
 
 ## Status
 
@@ -190,8 +200,8 @@ python check_real_model.py --backend tiny           # exercise the script withou
 
 Asserts every one of the 16 symbols is a single token for the Qwen tokenizer, then runs tests d
 (differentiable log-prob equals the teacher-forced scorer), e (batch/padding invariance), f
-(tabular copy reproduces the policy) and mass conservation on two problems, and prints the
-measured numbers, not just pass/fail.
+(tabular copy reproduces the policy) and mass conservation on two problems, plus the float32 /
+bfloat16 precision comparison, and prints the measured numbers, not just pass/fail.
 
 The mass-conservation walk visits every grammar-and-semantics-reachable prefix — about 10 000
 nodes per problem — so it is the slow check. `batched.py` walks the same tree breadth-first so
@@ -203,10 +213,15 @@ Tolerances for d and e are 1e-3 there, against 1e-5 in `test_protocol.py`, becau
 bfloat16 and the two code paths group sequences into batches differently. If the printed maxima
 are much larger than the tiny model's ~2e-6, that is a finding about precision, not a pass.
 
-**Read the precision numbers that check prints.** `load_qwen` loads the model in `bfloat16`, so
-the 16 symbol logits are rounded to 8 mantissa bits before Policy A ever sees them, and the error
-is then compounded over up to 27 positions. Emulating a bf16 logit head on the tiny model, with
-the logits rescaled to stand in for a trained model's larger magnitudes, gives:
+**Read the precision numbers that check prints.** `load_qwen` now defaults to `float32`, and
+`check_real_model.py` measures what `bfloat16` would cost: it scores the same 20 sequences with a
+float32 and a bfloat16 copy of the model and prints the max absolute difference in sequence
+log-prob. That difference is reported, never asserted — the number is the finding.
+
+The reason the default changed: in `bfloat16` the 16 symbol logits are rounded to 8 mantissa bits
+before Policy A ever sees them, and the error compounds over up to 27 masked conditionals.
+Emulating a bf16 logit head on the tiny model, with the logits rescaled to stand in for a trained
+model's larger magnitudes, gives:
 
 | logit magnitude scale | max error in log pi(seq) | worst error in pi(seq) |
 | --- | --- | --- |
@@ -215,13 +230,15 @@ the logits rescaled to stand in for a trained model's larger magnitudes, gives:
 | 10 | 4.3e-2 nats | 4.4% |
 | 20 | 1.1e-1 nats | 11.2% |
 
-A trained 1.5B model's selected logits sit at the bottom of that table, not the top. A 10%
-error on `p_success` is tolerable for a probability reported to one significant figure; it is not
+A trained 1.5B model's selected logits sit at the bottom of that table, not the top. A 10% error
+on `p_success` is tolerable for a probability reported to one significant figure; it is not
 tolerable for a claim that `e` changed by a few percent between two checkpoints, which is exactly
-the claim this project exists to make. So before trusting a *difference* in `e`, load the model
-in `float32` (1.5B parameters is about 6 GB of weights, and the measurement loop is not memory
-bound) or keep the LM head in `float32`, and confirm the two agree. `load_qwen` takes a `dtype`
-argument for the first of those; it is frozen, so raise it rather than editing it silently.
+the claim this project exists to make. Hence `float32` by default (1.5B parameters is about 6 GB
+of weights, and the measurement loop is not memory bound). `bfloat16` is still available —
+`load_qwen(dtype=torch.bfloat16)`, or `backends.build(..., dtype="bfloat16")` — and is the right
+choice for throughput once a run only needs `p_success` to one significant figure. The table above
+is an emulation on a tiny model; the real number comes from the precision check, so read that
+before switching. The check loads a second copy of the model, so `--skip-precision` turns it off.
 
 ### Training smoke test
 
@@ -263,6 +280,31 @@ sbatch scripts/run.mine.sbatch check      # do this first and read the output
 sbatch scripts/run.mine.sbatch measure
 sbatch scripts/run.mine.sbatch train
 ```
+
+## Known limitations
+
+Things that are true of this repository as it stands, and must be dealt with before the real
+experiment rather than discovered during it. None of them is a bug; all of them would change a
+conclusion if ignored.
+
+* **`train_smoke.py` trains and evaluates on the same 32 problems.** The evaluation at each
+  checkpoint is `policy.measure` over the whole frozen instance set, which is also the set the
+  rollouts come from. That is fine for a plumbing test, and useless as evidence: a change in `e`
+  measured on the training problems cannot distinguish a change in the policy from fitting those
+  problems. The real experiment needs a held-out set, reported separately from the training set.
+* **The k3 KL estimator may have high variance here.** `exp(r) − r − 1` with
+  `r = log pi_ref − log pi_theta` is applied to a *sequence-level* log ratio of up to 27 masked
+  conditionals, not a per-token one, so `r` can be large and the exponential can dominate a batch
+  of 8 rollouts. Watch the logged `kl` value in the smoke run: it is exactly 0 on the first step
+  (LoRA initialises `B` at zero) and should then grow smoothly. Spikes of several orders of
+  magnitude between steps mean the estimator, not the policy, is moving — switch to
+  `--kl-estimator plain`, or to a per-token form, before the real run.
+* **`--max-grad-norm 1.0` and `--weight-decay 0.0` are implementation defaults, not choices.**
+  They were picked while writing the script because something had to be passed — `weight_decay`
+  explicitly because torch's `AdamW` defaults it to `1e-2`, which moves every LoRA parameter even
+  on a step whose advantage is zero. Neither has been justified or varied. Both must be fixed
+  deliberately, and recorded, before the real experiment; they are logged in every run header so a
+  later run can be checked against the one it is compared with.
 
 ## Layout
 

@@ -9,7 +9,8 @@ repository may introduce a second notion of "the probability of a generation".
 Four-number Countdown. A problem is a multiset of four numbers and a target (24 by default).
 The model must consume the four numbers in three lines, each line combining two of the
 currently remaining numbers and replacing them by the result, so that the single remaining
-number is the target.
+number is the target. Every intermediate must be an integer from 0 to 99, which excludes some
+solutions of the ordinary game; section 4 says exactly what that rules out and where it applies.
 
 The prompt is `protocol.render_prompt`; it states the format, the integer range, and shows one
 worked example with a different target (10) so the example cannot leak a solution.
@@ -103,13 +104,48 @@ when all of the following hold (`protocol.apply_line`, `protocol.compute`):
 * `a` and `b` are both present in the state, as two separate elements (so `3+3=6` needs two
   threes);
 * the operation is permitted: division requires `b != 0` and `a % b == 0`;
-* the true result lies in `0 .. max_value`, so negative intermediates and values above 99 are
-  not permitted;
+* the true result lies in `0 .. max_value`, that is **every intermediate must be an integer from
+  0 to 99** — see the restriction below;
 * the number `c` written by the model equals that true result. **The model writes the result
   itself**; a correct choice of operands with a wrong arithmetic result is a failure, not a
   repaired step.
 
 Applying a valid line removes `a` and `b` and inserts the result.
+
+### The integer 0..99 restriction, and what it excludes
+
+Every intermediate value must be an integer from 0 to 99. Negative intermediates, fractional
+intermediates, and values above 99 are all semantically invalid, so a line producing one is a
+`semantic_fail` and no continuation of it can succeed.
+
+**This excludes some standard Countdown solutions.** A route through a negative number
+(`3-5=-2`), through a fraction (`5/2=2.5`), or through a large product (`12*9=108`, then
+`108-84=24`) is a legitimate solution of the usual game and is *not* a solution here. Of the 495
+four-multisets of 1..9, **7 reach 24 in ordinary Countdown but have no solution at all under this
+grammar**: `(1,3,4,6)`, `(1,4,5,6)`, `(1,5,5,5)`, `(1,6,6,8)`, `(3,3,7,7)`, `(3,3,8,8)`,
+`(4,4,7,7)` — for instance `(1,5,5,5)` needs `5*(5-1/5)` and `(3,3,8,8)` needs `8/(3-8/3)`, both
+of which pass through a fraction. A further 41 have exactly one solvable first-step event here and
+are excluded by the two-event eligibility rule rather than by the arithmetic. The
+restriction comes from the grammar: two digits and no sign means there is no way to write such a
+value in the first place, which is what makes format errors impossible (section 2). It is a
+property of the protocol, not of the model, and it applies uniformly to every quantity:
+
+* `success_trajectories(prob)` enumerates the successful strings **under this grammar**, so
+  wherever this project says "all correct suffixes" — in particular the fixed-entry completion
+  `e` of section 7 — it means all correct suffixes reachable under this grammar. There is no
+  hidden correct continuation that `e` fails to count, but there are solutions of ordinary
+  Countdown that are simply not in the action space;
+* **instance eligibility uses the same rule.** `make_instances.py` keeps a 4-multiset only if it
+  has at least two distinct canonical first-step events leading to the target *under this
+  grammar*, and the `success_strings` and `solvable_entries` stored in `instances.json` are the
+  same restricted sets. A multiset solvable only through a negative or a value above 99 counts as
+  unsolvable here and is not in the instance set;
+* `classify` applies it too, so a model that writes a mathematically correct line with an
+  out-of-range intermediate is scored `semantic_fail`.
+
+Reported numbers are therefore about this action space throughout. A statement about "the"
+solution set of a Countdown problem would be a different claim and this repository does not make
+it.
 
 ## 5. Outcome classes
 
@@ -166,7 +202,10 @@ every event:
 
 `e` is the quantity the research question turns on: **the probability of reaching the target
 given that the route has been entered, summed over every correct suffix** — not the probability
-of one particular continuation, and not a renormalised success rate. It is computed exactly, by
+of one particular continuation, and not a renormalised success rate. "Every correct suffix" means
+every correct suffix *under this grammar*: intermediates must be integers from 0 to 99, so
+suffixes that would pass through a negative, a fraction or a value above 99 are not in the action
+space at all (section 4). It is computed exactly, by
 teacher-forced scoring of every successful string, never by sampling; the sampling check in
 `measure.py` exists only to confirm the exact numbers.
 
