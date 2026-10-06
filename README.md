@@ -203,6 +203,26 @@ Tolerances for d and e are 1e-3 there, against 1e-5 in `test_protocol.py`, becau
 bfloat16 and the two code paths group sequences into batches differently. If the printed maxima
 are much larger than the tiny model's ~2e-6, that is a finding about precision, not a pass.
 
+**Read the precision numbers that check prints.** `load_qwen` loads the model in `bfloat16`, so
+the 16 symbol logits are rounded to 8 mantissa bits before Policy A ever sees them, and the error
+is then compounded over up to 27 positions. Emulating a bf16 logit head on the tiny model, with
+the logits rescaled to stand in for a trained model's larger magnitudes, gives:
+
+| logit magnitude scale | max error in log pi(seq) | worst error in pi(seq) |
+| --- | --- | --- |
+| 1 (the tiny model's own) | 1.9e-3 nats | 0.2% |
+| 5 | 1.0e-2 nats | 1.0% |
+| 10 | 4.3e-2 nats | 4.4% |
+| 20 | 1.1e-1 nats | 11.2% |
+
+A trained 1.5B model's selected logits sit at the bottom of that table, not the top. A 10%
+error on `p_success` is tolerable for a probability reported to one significant figure; it is not
+tolerable for a claim that `e` changed by a few percent between two checkpoints, which is exactly
+the claim this project exists to make. So before trusting a *difference* in `e`, load the model
+in `float32` (1.5B parameters is about 6 GB of weights, and the measurement loop is not memory
+bound) or keep the LM head in `float32`, and confirm the two agree. `load_qwen` takes a `dtype`
+argument for the first of those; it is frozen, so raise it rather than editing it silently.
+
 ### Training smoke test
 
 ```bash
