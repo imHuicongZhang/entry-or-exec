@@ -3,7 +3,7 @@
 # the repository root.
 
 [tool.pytest.ini_options]
-testpaths = ["test_protocol.py", "test_batched.py", "test_train_smoke.py"]
+testpaths = ["test_protocol.py", "test_batched.py", "test_train_smoke.py", "test_kl.py"]
 addopts = "-q"
 
 [tool.ruff]

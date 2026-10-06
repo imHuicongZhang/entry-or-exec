@@ -41,10 +41,12 @@ class HFLM:
             out += [lg[j, :len(s) + 1] for j, s in enumerate(chunk)]
         return out
 
-    def seq_logp_torch(self, prob, seqs):
-        """Differentiable log pi(seq) under Policy A, shape [B]."""
-        lg = self._forward(prob, seqs).double()
-        B, T, _ = lg.shape
+    def _positions(self, prob, seqs, B, T):
+        """Grammar mask, target symbol and used-position arrays for a [B, T] logit block.
+
+        The single place allowed_mask enters the torch path: seq_logp_torch and kl_to_ref_torch
+        both go through here, so they cannot drift apart.
+        """
         mask = np.zeros((B, T, V), dtype=bool)
         tgt = np.zeros((B, T), dtype=np.int64)
         use = np.zeros((B, T), dtype=bool)
@@ -52,11 +54,64 @@ class HFLM:
             for t, c in enumerate(s):
                 mask[i, t] = allowed_mask(s[:t], prob.cfg)
                 tgt[i, t], use[i, t] = SID[c], True
-        mask[~use] = True  # unused positions: any finite value, zeroed below
+        mask[~use] = True  # unused positions: any finite value, zeroed by `use` downstream
+        return mask, tgt, use
+
+    def pos_logp_torch(self, prob, seqs):
+        """Differentiable Policy A log-probs at every position: (lp [B, T, V], m, use).
+
+        lp[i, t] is log pi(. | prompt + seqs[i][:t]) renormalised over the allowed symbols, so
+        lp[i, t] is -inf exactly where m[i, t] is False. `use[i, t]` says the position is a real
+        symbol of seqs[i] rather than right padding.
+        """
+        lg = self._forward(prob, seqs).double()
+        B, T, _ = lg.shape
+        mask, _, use = self._positions(prob, seqs, B, T)
+        m = torch.from_numpy(mask).to(lg.device)
+        lp = torch.log_softmax(lg.masked_fill(~m, float("-inf")), dim=-1)
+        return lp, m, torch.from_numpy(use).to(lg.device)
+
+    def seq_logp_torch(self, prob, seqs):
+        """Differentiable log pi(seq) under Policy A, shape [B]."""
+        lg = self._forward(prob, seqs).double()
+        B, T, _ = lg.shape
+        mask, tgt, use = self._positions(prob, seqs, B, T)
         m = torch.from_numpy(mask).to(lg.device)
         lp = torch.log_softmax(lg.masked_fill(~m, float("-inf")), dim=-1)
         tok = lp.gather(-1, torch.from_numpy(tgt).to(lg.device)[..., None])[..., 0]
         return (tok * torch.from_numpy(use).to(lg.device)).sum(-1)
+
+    def kl_to_ref_torch(self, prob, seqs, ref_context):
+        """Exact per-position KL(pi_theta || pi_ref), summed over positions, shape [B].
+
+        At every position of every sequence both policies are evaluated under the same
+        allowed_mask and the same masked log-softmax, and the KL is the exact sum over the allowed
+        symbols,
+
+            sum_v pi_theta(v | h) * (log pi_theta(v | h) - log pi_ref(v | h)),
+
+        summed over the positions of the sequence. The mean over sequences is taken by the caller,
+        exactly as for seq_logp_torch.
+
+        This is the gradient of the stated objective. Estimators that treat the sampled symbols as
+        fixed are not: `log pi_theta(s) - log pi_ref(s)` has zero expected gradient, and the k3
+        form `exp(r) - r - 1` with `r = log pi_ref - log pi_theta` has expected gradient
+        `d KL(pi_ref || pi_theta)`, the wrong direction. For pi_theta = (0.8, 0.2) and
+        pi_ref = (0.5, 0.5) the gradient on the first logit is 0.221807; those two give 0.3 and 0.
+        test_kl.py pins this.
+
+        `ref_context` is a zero-argument callable returning a context manager under which
+        self.model evaluates as the reference policy -- peft's `disable_adapter` for LoRA.
+        """
+        lp, m, use = self.pos_logp_torch(prob, seqs)
+        with torch.no_grad(), ref_context():
+            lp_ref = self.pos_logp_torch(prob, seqs)[0].detach()
+        # Disallowed symbols hold -inf in both tensors. Fill before subtracting so that inf - inf
+        # is never evaluated: pi_theta is exactly 0 there, so the term is 0 either way, but a nan
+        # would otherwise reach the backward pass.
+        p = torch.exp(lp).masked_fill(~m, 0.0)
+        d = lp.masked_fill(~m, 0.0) - lp_ref.masked_fill(~m, 0.0)
+        return ((p * d).sum(-1) * use.to(lp.dtype)).sum(-1)
 
 
 def load_qwen(name="Qwen/Qwen2.5-1.5B-Instruct", device="cuda", dtype=torch.float32,

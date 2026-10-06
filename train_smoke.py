@@ -6,8 +6,10 @@ What it does, per optimizer step, for each problem in the step's batch:
     'overlength'
   * advantage = reward - group mean reward, the group being that problem's 8 rollouts
   * log pi from HFLM.seq_logp_torch, i.e. the same masked log-softmax as every measurement
-  * optional reference-policy KL, the reference being the same weights with the LoRA adapter
-    disabled, scored with the same Policy A log-probs on the same sampled sequences
+  * optional reference-policy KL: the exact per-position KL(pi_theta || pi_ref) summed over the
+    positions of each sampled sequence and averaged over sequences, the reference being the same
+    weights with the LoRA adapter disabled under no_grad, both policies evaluated with the same
+    mask and the same masked log-softmax (HFLM.kl_to_ref_torch)
   * one AdamW step
 
 What it logs, per optimizer step: mean reward, the number of rollouts per first-line entry per
@@ -70,12 +72,6 @@ def wrap_lora(lm, backend, rank=LORA_RANK, alpha=None, targets=None):
                        "trainable_fraction": n_tr / n_all}
 
 
-def ref_logp(lm, prob, seqs):
-    """log pi_ref under the same Policy A: identical weights with the adapter switched off."""
-    with torch.no_grad(), lm.model.disable_adapter():
-        return lm.seq_logp_torch(prob, seqs).detach()
-
-
 def rollout_stats(seqs, rewards, rec):
     """Entry counts over ALL first lines, and entered-or-not over the tracked (solvable) entries."""
     first = [s.split(NL)[0] for s in seqs]
@@ -91,8 +87,7 @@ def rollout_stats(seqs, rewards, rec):
     }
 
 
-def step_once(lm, batch, rng, opt, trainable, kl_coef, n_rollouts, max_grad_norm,
-              kl_estimator="k3"):
+def step_once(lm, batch, rng, opt, trainable, kl_coef, n_rollouts, max_grad_norm):
     """One optimizer step over `batch` = [(Problem, record), ...]. -> log row."""
     opt.zero_grad(set_to_none=True)
     pg_terms, kl_terms, per_problem = [], [], {}
@@ -108,10 +103,8 @@ def step_once(lm, batch, rng, opt, trainable, kl_coef, n_rollouts, max_grad_norm
         a = torch.as_tensor(adv, dtype=logp.dtype, device=logp.device)
         pg_terms.append(-(a * logp))
         if kl_coef:
-            lr_ = ref_logp(lm, prob, seqs) - logp       # log pi_ref - log pi_theta
-            # k3 (Schulman): non-negative, low variance, unbiased for KL(pi_theta || pi_ref)
-            kl = torch.exp(lr_) - lr_ - 1.0 if kl_estimator == "k3" else -lr_
-            kl_terms.append(kl)
+            # exact per-position KL(pi_theta || pi_ref), shape [B]; see HFLM.kl_to_ref_torch
+            kl_terms.append(lm.kl_to_ref_torch(prob, seqs, lm.model.disable_adapter))
         st = rollout_stats(seqs, r, rec)
         st["outcomes"] = dict(collections.Counter(cls))
         st["logp_mean"] = float(logp.detach().float().mean())
@@ -155,10 +148,9 @@ def main():
     ap.add_argument("--lr", type=float, default=LR_CHOICES[0], choices=LR_CHOICES,
                     help="one of the two pre-declared learning rates")
     ap.add_argument("--kl-coef", type=float, default=KL_CHOICES[0], choices=KL_CHOICES,
-                    help="reference-policy KL coefficient; 0 disables the term")
-    ap.add_argument("--kl-estimator", default="k3", choices=["k3", "plain"],
-                    help="k3 = exp(r)-r-1 with r = logp_ref - logp_theta (default); "
-                         "plain = logp_theta - logp_ref")
+                    help="reference-policy KL coefficient; 0 disables the term. The term is the "
+                         "exact per-position KL(pi_theta || pi_ref); there is no choice of "
+                         "estimator")
     ap.add_argument("--lora-rank", type=int, default=LORA_RANK)
     ap.add_argument("--rollouts", type=int, default=ROLLOUTS, help="rollouts per problem per step")
     ap.add_argument("--steps", type=int, default=20, help="optimizer steps")
@@ -202,6 +194,8 @@ def main():
               "n_eval_instances": len(eval_instances),
               "reward": "binary, 1.0 iff protocol.classify == 'success'",
               "baseline": "group mean over the problem's rollouts",
+              "kl": "exact per-position KL(pi_theta || pi_ref), summed over positions, "
+                    "mean over sequences; reference = same weights, adapter disabled",
               "note": "smoke test of plumbing; not a sweep and not an experiment"}
     log = open(log_path, "w")
 
@@ -214,7 +208,7 @@ def main():
     print(f"backend     {json.dumps(backend_desc)}")
     print(f"lora        {json.dumps(lora_desc)}")
     print(f"optimizer   AdamW lr={args.lr} wd={args.weight_decay} "
-          f"kl_coef={args.kl_coef} ({args.kl_estimator}) clip={args.max_grad_norm}")
+          f"kl_coef={args.kl_coef} (exact per-position KL) clip={args.max_grad_norm}")
     print(f"schedule    {args.steps} steps x {args.problems_per_step} problems "
           f"x {args.rollouts} rollouts, eval every {args.eval_every} on "
           f"{len(eval_instances)} instances\n")
@@ -238,7 +232,7 @@ def main():
         pick = [order[((step - 1) * k + i) % len(order)] for i in range(k)]
         batch = [instances[i] for i in pick]
         row = step_once(lm, batch, rng, opt, trainable, args.kl_coef, args.rollouts,
-                        args.max_grad_norm, args.kl_estimator)
+                        args.max_grad_norm)
         row = {"record": "step", "step": step, "seconds": round(time.time() - t0, 1), **row}
         emit(row)
         entered = sum(sum(v["entered_tracked_entry"].values()) for v in row["per_problem"].values())
