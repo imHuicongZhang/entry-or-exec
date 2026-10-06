@@ -9,6 +9,10 @@ number produced by measure.py means anything.
   f          a tabular copy of the policy reproduces it on every full history
   mass       the exhaustive tree walk puts total mass 1 on success / semantic_fail / overlength,
              the overlength mass is 0, and the success mass equals measure()'s p_success_total
+  precision  the same 20 sequences scored by a float32 and a bfloat16 copy of the model, with the
+             max absolute difference in sequence log-prob printed. load_qwen defaults to float32;
+             this says what bfloat16 would cost if a run switches to it for throughput. It is
+             reported, never asserted: the number is the finding.
 
 The mass-conservation walk visits every grammar-and-semantics-reachable prefix, which is tens of
 thousands of forward positions per problem. batched.mass_conservation_batched is used instead of
@@ -41,6 +45,7 @@ TOL_D = 1e-3
 TOL_E = 1e-3
 TOL_F = 1e-3
 TOL_MASS = 1e-6
+N_PRECISION_SEQS = 20
 
 BAD_SEQS = ["12*34=56\n7-7=0\n0+0=0\n", "9", "6/2=3\n3+3=6\n"]
 
@@ -138,6 +143,38 @@ def check_mass(lm, prob, rep, batch_size=256):
             f"{stats['nodes']} nodes in {stats['lm_calls']} LM calls, {time.time() - t0:.0f}s")
 
 
+def precision_seqs(prob, n=N_PRECISION_SEQS):
+    """Exactly n distinct scorable strings, deterministically: successes, then deliberately
+    wrong ones, then partial prefixes of successes to fill. Partials are included on purpose --
+    a short string exercises fewer masked conditionals, so the error should scale with length."""
+    trajs = success_trajectories(prob)
+    pool = list(trajs) + BAD_SEQS + [tr[:i] for tr in trajs for i in range(1, len(tr))]
+    out = list(dict.fromkeys(pool))[:n]
+    assert len(out) == n, f"only {len(out)} distinct strings available for {prob.key}"
+    return out
+
+
+def check_precision(lm_fp32, prob, cfg_paths, rep, batch_size=64):
+    """float32 vs bfloat16 on identical sequences. Measures, does not judge."""
+    import torch
+    seqs = precision_seqs(prob)
+    a = seq_logp(lm_fp32, prob, seqs)
+    lm_bf16, desc = backends.build("qwen", cfg_paths, batch_size=batch_size, dtype="bfloat16")
+    try:
+        b = seq_logp(lm_bf16, prob, seqs)
+    finally:
+        del lm_bf16
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    d = np.abs(a - b)
+    ratio = np.exp(b - a)
+    worst = float(max(abs(ratio.min() - 1.0), abs(ratio.max() - 1.0)))
+    rep.add(f"precision fp32 vs bf16 [{prob.key}]", True,
+            f"{len(seqs)} sequences, max |d log pi| {d.max():.3e} nats "
+            f"(median {np.median(d):.3e}), worst pi(seq) error {100 * worst:.2f}%; "
+            f"bf16 dtype {desc['dtype']}  [reported, not asserted]")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -153,6 +190,8 @@ def main():
                     help="prefixes per LM call in the exhaustive walk")
     ap.add_argument("--skip-mass", action="store_true",
                     help="skip the exhaustive walk (the slow check)")
+    ap.add_argument("--skip-precision", action="store_true",
+                    help="skip the float32/bfloat16 comparison (it loads a second model copy)")
     args = ap.parse_args()
 
     cfg_paths = paths.load_paths(args.paths)
@@ -189,6 +228,12 @@ def main():
         check_d(lm, prob, rep)
         check_e(lm, prob, rep)
         check_f(lm, prob, rep)
+
+    if args.backend == "qwen" and not args.skip_precision:
+        print("\nprecision: float32 vs bfloat16 (loads a second copy of the model)")
+        check_precision(lm, chosen[0][0], cfg_paths, rep, batch_size=args.batch_size)
+    elif args.backend != "qwen":
+        print("\nprecision check skipped: it compares two dtypes of the real model")
 
     if args.skip_mass:
         print("\nmass conservation skipped (--skip-mass)")

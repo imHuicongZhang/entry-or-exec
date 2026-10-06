@@ -18,8 +18,12 @@ def set_hf_cache(cfg_paths):
     return cache
 
 
-def build(name, cfg_paths=None, seed=0, boost=3.0, device=None, batch_size=64):
-    """-> (lm, description dict). `qwen` requires a filled-in paths file."""
+def build(name, cfg_paths=None, seed=0, boost=3.0, device=None, batch_size=64, dtype=None):
+    """-> (lm, description dict). `qwen` requires a filled-in paths file.
+
+    dtype applies to the `qwen` backend only and defaults to load_qwen's default (float32).
+    Pass "bfloat16" or torch.bfloat16 to trade precision in log pi(seq) for throughput.
+    """
     if name == "mock":
         from policy import MockLM
         return MockLM(seed=seed, boost=boost), {
@@ -45,14 +49,17 @@ def build(name, cfg_paths=None, seed=0, boost=3.0, device=None, batch_size=64):
     if name == "qwen":
         if cfg_paths is None:
             raise RuntimeError("the qwen backend needs a paths file")
-        set_hf_cache(cfg_paths)
+        cache = set_hf_cache(cfg_paths)
         model_path = paths.require(cfg_paths, "MODEL_PATH")
         import torch
         from hf_lm import load_qwen
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        lm = load_qwen(name=model_path, device=dev)
+        kw = {} if dtype is None else {"dtype": getattr(torch, dtype) if isinstance(dtype, str)
+                                      else dtype}
+        lm = load_qwen(name=model_path, device=dev, cache_dir=cache, **kw)
         lm.bs = batch_size
         return lm, {"backend": "qwen", "model_path": model_path, "device": dev,
+                    "cache_dir": cache,
                     "dtype": str(next(lm.model.parameters()).dtype)}
 
     raise ValueError(f"unknown backend {name!r}, expected one of {CHOICES}")

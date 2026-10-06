@@ -59,11 +59,23 @@ class HFLM:
         return (tok * torch.from_numpy(use).to(lg.device)).sum(-1)
 
 
-def load_qwen(name="Qwen/Qwen2.5-1.5B-Instruct", device="cuda", dtype=torch.bfloat16):
-    """NOT RUN in the authoring environment (no GPU, no model hub access). Verify on first use."""
+def load_qwen(name="Qwen/Qwen2.5-1.5B-Instruct", device="cuda", dtype=torch.float32,
+              cache_dir=None):
+    """NOT RUN in the authoring environment (no GPU, no model hub access). Verify on first use.
+
+    dtype defaults to float32. Policy A multiplies up to 27 masked conditionals, so rounding the
+    symbol logits to bfloat16's 8 mantissa bits shows up directly in log pi(seq) and therefore in
+    e; check_real_model.py measures that difference on the real model. bfloat16 remains available
+    by passing dtype=torch.bfloat16, which is the right choice for throughput once a run only
+    needs p_success to one significant figure.
+
+    cache_dir is passed to both from_pretrained calls so the weight and tokenizer cache location
+    is explicit rather than dependent on HF_HOME having been set before transformers was imported.
+    """
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    tok = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype).to(device).eval()
+    tok = AutoTokenizer.from_pretrained(name, cache_dir=cache_dir)
+    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype,
+                                                cache_dir=cache_dir).to(device).eval()
     sym_ids = []
     for s in SYMS:
         ids = tok.encode(s, add_special_tokens=False)
