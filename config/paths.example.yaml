@@ -1,0 +1,34 @@
+# Every machine-specific value used anywhere in this repo. Nothing outside this file may
+# hardcode a directory name, a partition, an account or a model location.
+#
+# Usage on Skipjack:
+#   cp config/paths.example.yaml config/paths.yaml
+#   # then replace every <PLACEHOLDER> below with a real value
+#
+# config/paths.yaml is gitignored. Scripts read config/paths.yaml if it exists, otherwise
+# config/paths.example.yaml, and abort with a clear message naming any key they need that
+# still holds a <PLACEHOLDER>. Override the file with --paths or $PILOT_PATHS.
+
+# Absolute path of this checkout on the cluster.
+PROJECT_ROOT: <PROJECT_ROOT>
+
+# Where generated (non-frozen) data goes, e.g. instance files for calibration targets.
+# instances.json itself is frozen and lives in the repository, not here.
+DATA_DIR: <DATA_DIR>
+
+# Where measure.py and train_smoke.py write their JSON / JSONL runs.
+OUTPUT_DIR: <OUTPUT_DIR>
+
+# Exported as HF_HOME so transformers caches weights on scratch, not in $HOME.
+HF_CACHE_DIR: <HF_CACHE_DIR>
+
+# Model id or local snapshot directory for Qwen/Qwen2.5-1.5B-Instruct.
+MODEL_PATH: <MODEL_PATH>
+
+# Conda environment name (or absolute prefix) holding the requirements.txt deps.
+CONDA_ENV: <CONDA_ENV>
+
+# SLURM submission values for scripts/run.sbatch.
+SLURM_PARTITION: <SLURM_PARTITION>
+SLURM_ACCOUNT: <SLURM_ACCOUNT>
+SLURM_GPU_TYPE: <SLURM_GPU_TYPE>

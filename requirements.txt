@@ -1,0 +1,7 @@
+numpy
+scipy
+torch
+transformers
+peft
+pytest
+PyYAML

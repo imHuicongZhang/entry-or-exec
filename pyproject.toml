@@ -1,0 +1,10 @@
+# Config carrier only. This repo is a flat set of scripts, not an installable package:
+# install the dependencies with `pip install -r requirements.txt` and run the scripts from
+# the repository root.
+
+[tool.pytest.ini_options]
+testpaths = ["test_protocol.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100

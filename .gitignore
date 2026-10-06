@@ -1,0 +1,31 @@
+# virtualenvs / local python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# the filled-in copy of config/paths.example.yaml is machine specific
+config/paths.yaml
+config/paths.*.yaml
+!config/paths.example.yaml
+
+# run outputs, logs, model weights, caches -- never committed
+outputs/
+runs/
+logs/
+slurm-*.out
+*.jsonl
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+hf_cache/
+.cache/
+
+# instance files for non-default targets (calibration), unlike the frozen instances.json
+instances_target*.json
+
+.DS_Store
