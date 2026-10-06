@@ -203,4 +203,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    paths.run_main(main)

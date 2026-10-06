@@ -72,3 +72,14 @@ def add_paths_arg(ap):
     ap.add_argument("--paths", default=None,
                     help="paths yaml to read (default: config/paths.yaml, else the example)")
     return ap
+
+
+def run_main(fn):
+    """Entry point wrapper: an unfilled placeholder is a clear message, not a traceback."""
+    import sys
+    try:
+        fn()
+    except UnfilledPlaceholder as exc:
+        sys.exit(f"error: {exc}")
+    except FileNotFoundError as exc:
+        sys.exit(f"error: {exc}")
