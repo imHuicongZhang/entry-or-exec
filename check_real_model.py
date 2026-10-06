@@ -19,10 +19,13 @@ thousands of forward positions per problem. batched.mass_conservation_batched is
 policy.mass_conservation; test_batched.py pins the two to 1e-12 on the mock, so the result is the
 same walk with the LM calls batched. It is still the slow part -- budget time for it.
 
-Tolerances for d and e are looser than in test_protocol.py on purpose: the tiny test model runs
-in float32 on CPU in one batch, while Qwen runs in bfloat16 and the two code paths group
-sequences into batches differently, so identical mathematics can differ in the last bf16 digits.
-The measured maxima are printed, not just a pass/fail, so a surprise is visible.
+Tolerances for d and e are looser than in test_protocol.py on purpose. Both models run in float32
+now that load_qwen defaults to it, but the tiny test model runs on CPU in a single batch while
+Qwen runs on GPU and the two code paths group sequences into batches differently, so identical
+mathematics can still differ in the last digits. The measured maxima are printed, not just a
+pass/fail, so a surprise is visible: on the tiny model they are around 2e-6, and a real-model
+figure far above that is a finding about precision rather than a pass. If a run deliberately
+switches to bfloat16 for throughput, expect these to grow and read the precision check first.
 
     python check_real_model.py                        # qwen, first two instances
     python check_real_model.py --backend tiny         # exercise this script without the model

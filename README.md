@@ -105,8 +105,8 @@ used. **Nothing in the third column may be changed to "yes" without pasting the 
 justifies it.** The two local backends are a deterministic pseudo-random mock and a randomly
 initialised 2-layer GPT-2; neither has any property of a real LLM, and neither solves Countdown.
 
-Local test suite: **26 passed** — the 12 frozen tests in `test_protocol.py`, 7 in
-`test_batched.py`, 7 in `test_train_smoke.py`.
+Local test suite: **41 passed** — the 12 frozen tests in `test_protocol.py`, 7 in
+`test_batched.py`, 7 in `test_train_smoke.py`, 15 in `test_kl.py`.
 
 ## Install
 
@@ -152,8 +152,9 @@ Override the location of the paths file with `--paths` or `$PILOT_PATHS`.
 ### Tests
 
 ```bash
-pytest                         # all 26
+pytest                         # all 41
 pytest test_protocol.py -v     # the 12 frozen tests
+pytest test_kl.py -v           # the KL term against its analytic gradient
 ```
 
 ### Instances (already committed — only rerun to verify reproducibility)
@@ -249,9 +250,12 @@ python train_smoke.py --backend qwen --lr 1e-5 --kl-coef 0.01       # on the clu
 
 Minimal GRPO: LoRA rank 16, 8 rollouts per problem from `policy.sample`, binary reward from
 `protocol.classify`, group-mean baseline, log-probs from `HFLM.seq_logp_torch`, AdamW.
-`--lr` takes `1e-5` or `5e-5`; `--kl-coef` takes `0.01` or `0`, where the reference policy is the
-same weights with the LoRA adapter disabled, scored with the same Policy A log-probs on the same
-sampled sequences (k3 estimator, `exp(r) − r − 1`).
+`--lr` takes `1e-5` or `5e-5`; `--kl-coef` takes `0.01` or `0`. The KL term is the **exact
+per-position** `KL(pi_theta || pi_ref)`: at every position of every sampled sequence both policies
+are evaluated under the same `allowed_mask` and the same masked log-softmax, and
+`sum_v pi_theta(v|h) (log pi_theta(v|h) − log pi_ref(v|h))` is summed over positions and averaged
+over sequences (`HFLM.kl_to_ref_torch`). The reference is the same weights with the LoRA adapter
+disabled, under `no_grad`. There is no choice of estimator.
 
 Logged per optimizer step: mean reward, the number of rollouts per first-line entry per problem,
 and — separately — **whether the update contained any rollout entering each tracked entry**. The
@@ -267,8 +271,8 @@ Two things to know when reading a local run:
   optimizer path is tested in `test_train_smoke.py`, which patches `classify` so a group contains
   both outcomes and then asserts the LoRA parameters actually move;
 * the KL term is exactly 0 on the first step whatever the coefficient, because LoRA initialises
-  `B` at zero, so `pi_theta` and `pi_ref` are the same distribution. It becomes positive once the
-  adapter has moved.
+  `B` at zero, so `pi_theta` and `pi_ref` are the same distribution — bit-exactly zero, not merely
+  small, which `test_kl.py` asserts. It becomes positive once the adapter has moved.
 
 ### SLURM
 
@@ -292,13 +296,23 @@ conclusion if ignored.
   rollouts come from. That is fine for a plumbing test, and useless as evidence: a change in `e`
   measured on the training problems cannot distinguish a change in the policy from fitting those
   problems. The real experiment needs a held-out set, reported separately from the training set.
-* **The k3 KL estimator may have high variance here.** `exp(r) − r − 1` with
-  `r = log pi_ref − log pi_theta` is applied to a *sequence-level* log ratio of up to 27 masked
-  conditionals, not a per-token one, so `r` can be large and the exponential can dominate a batch
-  of 8 rollouts. Watch the logged `kl` value in the smoke run: it is exactly 0 on the first step
-  (LoRA initialises `B` at zero) and should then grow smoothly. Spikes of several orders of
-  magnitude between steps mean the estimator, not the policy, is moving — switch to
-  `--kl-estimator plain`, or to a per-token form, before the real run.
+* **The KL term is exact, and the sampling of the states it is evaluated at is not.** The term is
+  the exact per-position `KL(pi_theta || pi_ref)` over the allowed symbols, summed over the
+  positions of each sampled sequence and averaged over sequences, so it is differentiable in
+  `theta` directly and no sampling noise enters the KL at a visited position. What remains
+  approximate is *which* positions are visited: the prefixes come from the current policy's
+  rollouts, and the gradient of that visitation distribution is not taken. That is the standard
+  choice and is almost certainly fine at these coefficients, but it means the term is a KL over
+  the states the policy actually reaches, not over the whole tree — worth stating plainly rather
+  than describing the term as simply "the KL". Still watch the logged `kl` in the smoke run: it is
+  exactly 0 on the first step (LoRA initialises `B` at zero) and should grow smoothly.
+
+  This replaced two estimators that a reviewer showed were not gradients of the stated objective
+  at all, because both treated the sampled symbols as fixed. For `pi_theta = (0.8, 0.2)` against
+  `pi_ref = (0.5, 0.5)` the gradient on the first logit is `0.221807`; `plain` gave `0` (a score
+  function with no baseline, zero in expectation) and k3's `exp(r) − r − 1` gave `0.3`, which is
+  the gradient of `KL(pi_ref || pi_theta)` — the wrong direction. `test_kl.py` pins the exact term
+  to the analytic gradient, that example included, and there is no longer a choice of estimator.
 * **`--max-grad-norm 1.0` and `--weight-decay 0.0` are implementation defaults, not choices.**
   They were picked while writing the script because something had to be passed — `weight_decay`
   explicitly because torch's `AdamW` defaults it to `1e-2`, which moves every LoRA parameter even
@@ -323,6 +337,7 @@ check_real_model.py            tokenizer + d + e + f + mass conservation on the 
 train_smoke.py                 minimal GRPO with LoRA
 test_batched.py                batched walk == frozen recursive walk
 test_train_smoke.py            the GRPO step actually produces a gradient
+test_kl.py                     the KL term == the analytic gradient of KL(pi_theta || pi_ref)
 config/paths.example.yaml      every machine-specific value, nowhere else
 scripts/run.sbatch             SLURM template
 PROTOCOL.md                    the full specification
