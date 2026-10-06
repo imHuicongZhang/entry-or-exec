@@ -121,7 +121,20 @@ def test_f_tabular_copy(backend):
     assert abs(ma["p_success_total"] - mb["p_success_total"]) < 1e-9
     for k in ma["entries"]:
         assert abs(ma["entries"][k]["p_entry"] - mb["entries"][k]["p_entry"]) < 1e-9
-    assert all(k[1] in hist or True for k in tab.theta)  # parameters are keyed by full history
+    # parameters are keyed by (problem key, full history string), and the set of stored histories
+    # is prefix closed: every proper prefix of a stored history is itself stored (the empty
+    # history included). Nothing is shared between histories and nothing is merged by state.
+    stored = set()
+    for k in tab.theta:
+        assert isinstance(k, tuple) and len(k) == 2, f"theta key is not a 2-tuple: {k!r}"
+        pk, h = k
+        assert pk == P4.key, f"theta key holds the wrong problem: {pk!r}"
+        assert isinstance(h, str) and set(h) <= set(SYMS), f"history is not a symbol string: {h!r}"
+        stored.add(h)
+    assert "" in stored
+    for h in stored:
+        for i in range(len(h)):
+            assert h[:i] in stored, f"history {h!r} stored but its prefix {h[:i]!r} is not"
 
 
 # g. event-level sums: hand-computed, no omission and no double counting
