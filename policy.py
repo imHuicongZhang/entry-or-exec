@@ -96,6 +96,8 @@ class TabularLM:
         k = (prob.key, prefix)
         if k not in self.theta:
             self.theta[k] = np.array(self.base.pos_logits(prob, [prefix])[0][-1], dtype=np.float64)
+        # returned by reference on purpose: theta is the parameter store, so a caller that writes
+        # to this row is editing the policy, which is what a tabular optimiser needs to do
         return self.theta[k]
 
     def pos_logits(self, prob, seqs):
@@ -135,8 +137,13 @@ def measure(lm, prob):
         ev["e"] = ev["p_success"] / ev["p_entry"] if ev["p_entry"] > 0 else None
         ev["share"] = ev["p_success"] / total if total > 0 else None
     p_valid_first = float(sum(p_first.values()))
+    p_wrong_first = 1.0 - p_valid_first  # raw, never clamped to 0
+    # A small negative value is float cancellation when the policy puts almost all of its first
+    # line mass on semantically valid lines. Anything beyond that means the mask, the scorer or
+    # valid_lines disagree about which first lines exist, which clamping would hide.
+    assert p_wrong_first > -1e-9, f"p_first_line_semantically_wrong = {p_wrong_first!r}"
     return {"problem": prob.key, "p_success_total": total,
-            "p_first_line_semantically_wrong": 1.0 - p_valid_first,
+            "p_first_line_semantically_wrong": p_wrong_first,
             "p_fail_total": 1.0 - total, "p_overlength": 0.0,  # zero by construction of the grammar
             "n_success_strings": len(trajs), "entries": entries, "events": dict(events)}
 
